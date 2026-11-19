@@ -1,0 +1,7 @@
+name: astrbot_plugin_mail_notify
+display_name: 閭欢鎻愰啋
+short_desc: 鍙閭鏍囬锛屽嬀閫夊満鏅敤 AI 绛涘嚭閲嶈閭欢骞舵帹閫佸埌 QQ锛屽甫鑷祴銆?desc: 瀹氭椂浠ュ彧璇绘柟寮忔鏌ラ偖绠辨柊閭欢锛圙mail銆丵Q銆?63銆?26銆乊ahoo銆乮Cloud銆丗astmail銆乑oho 鎴栦换鎰?IMAP锛夛紝榛樿鍙鍙栧彂浠朵汉鍜屾爣棰橈紝浜ょ粰 AI 鍒ゆ柇鏄惁灞炰簬浣犲叧蹇冪殑涓婚锛圖eepSeek銆丱penAI銆侀€氫箟銆佹櫤璋便€並imi銆丟emini銆丱llama锛屾垨 AstrBot 閲屽凡閰嶇疆鐨勬ā鍨嬶級锛岀浉鍏崇殑灏遍€氳繃 AstrBot 涓诲姩鍙戦€佸埌 QQ 绉佽亰銆傛敮鎸佸睆钄介獙璇佺爜銆佸彂浠朵汉榛戠櫧鍚嶅崟銆佸厤鎵撴壈鏃舵锛屽彲閫夊啓鍏ュ璇濆巻鍙层€俁ead-only mail watcher that uses an LLM to pick important mails by subject and notifies you on QQ.
+version: 0.4.4
+author: qualcone
+repo: https://github.com/qualcone/astrbot_plugin_mail_notify
+astrbot_version: ">=4.16,<5"
