@@ -1,7 +1,8 @@
 name: astrbot_plugin_mail_notify
-display_name: 閭欢鎻愰啋
-short_desc: 鍙閭鏍囬锛屽嬀閫夊満鏅敤 AI 绛涘嚭閲嶈閭欢骞舵帹閫佸埌 QQ锛屽甫鑷祴銆?desc: 瀹氭椂浠ュ彧璇绘柟寮忔鏌ラ偖绠辨柊閭欢锛圙mail銆丵Q銆?63銆?26銆乊ahoo銆乮Cloud銆丗astmail銆乑oho 鎴栦换鎰?IMAP锛夛紝榛樿鍙鍙栧彂浠朵汉鍜屾爣棰橈紝浜ょ粰 AI 鍒ゆ柇鏄惁灞炰簬浣犲叧蹇冪殑涓婚锛圖eepSeek銆丱penAI銆侀€氫箟銆佹櫤璋便€並imi銆丟emini銆丱llama锛屾垨 AstrBot 閲屽凡閰嶇疆鐨勬ā鍨嬶級锛岀浉鍏崇殑灏遍€氳繃 AstrBot 涓诲姩鍙戦€佸埌 QQ 绉佽亰銆傛敮鎸佸睆钄介獙璇佺爜銆佸彂浠朵汉榛戠櫧鍚嶅崟銆佸厤鎵撴壈鏃舵锛屽彲閫夊啓鍏ュ璇濆巻鍙层€俁ead-only mail watcher that uses an LLM to pick important mails by subject and notifies you on QQ.
-version: 0.4.4
+display_name: 邮件提醒
+short_desc: 只读邮箱标题，按场景用 AI 筛选重要邮件并推送到 QQ，还能写入对话历史让机器人接着聊。
+desc: 定时以只读方式检查邮箱（Gmail、QQ、163、126、Yahoo、iCloud、Fastmail、Zoho 或任意 IMAP），默认只读发件人和标题，交给 AI 判断是否属于你勾选的场景（DeepSeek、OpenAI、通义千问、GLM、Kimi、Gemini、Ollama，或 AstrBot 里已配置的模型），相关的通过 AstrBot 主动发送到 QQ 私聊，可选写入对话历史并用机器人的人设语气提醒。支持屏蔽验证码、白名单黑名单、免打扰时段、自测。
+version: 0.4.5
 author: qualcone
 repo: https://github.com/qualcone/astrbot_plugin_mail_notify
 astrbot_version: ">=4.16,<5"
