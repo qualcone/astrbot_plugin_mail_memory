@@ -400,7 +400,6 @@
   "schedule": {
     "description": "⏰ 时间与免打扰",
     "type": "object",
-    "hint": "免打扰用的时区跟随 AstrBot 系统设置里的时区（默认北京时间），这里不用再单独设置。",
     "items": {
       "interval_minutes": {
         "description": "检查间隔（分钟）",

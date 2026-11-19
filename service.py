@@ -67,6 +67,7 @@ class MailService:
         self._provider_chat = provider_chat
         self._fetcher = fetcher or core.fetch_new
         self._recent_fetcher = recent_fetcher or core.fetch_recent
+        self._folder_lister = core.list_folders
         self._now_fn = now_fn
         self._default_tz = default_timezone
         self._persona = persona_lookup
@@ -466,6 +467,26 @@ class MailService:
             if verdict is None:
                 verdict = f"通知（{d.category}）{('：' + d.hint) if d.hint else ''}"
             lines.append(f"- {sanitize(m.subject, 50)} ← {sanitize(m.sender, 30)}：{verdict}")
+        return "\n".join(lines)
+
+    # -------------------------------------------------------- /mail folders
+    async def folders(self) -> str:
+        st = self.settings()
+        miss = [m for m in st.missing() if m.startswith("email.")]
+        if miss:
+            return "配置不完整，请在插件配置里填写：" + "、".join(core.FIELD_LABELS.get(m, m) for m in miss)
+        try:
+            names = await asyncio.to_thread(self._folder_lister, st)
+        except (ImapError, OSError, imaplib.IMAP4.error) as e:
+            return "连接邮箱失败：" + sanitize(redact(f"{type(e).__name__}: {e}", st.secrets()), 120)
+        if not names:
+            return "邮箱里没有列出任何文件夹。"
+        watched = set(st.imap_folders)
+        lines = [f"这个邮箱里的文件夹（共 {len(names)} 个，原样填进“要监控的文件夹”即可；带 ✓ 的正在监控）："]
+        for n in names[:60]:
+            lines.append(f"{'✓' if n in watched else '·'} {sanitize(n, 60)}")
+        if len(names) > 60:
+            lines.append(f"……另有 {len(names) - 60} 个未显示")
         return "\n".join(lines)
 
     # --------------------------------------------------------- /mail selftest

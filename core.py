@@ -771,6 +771,56 @@ def fetch_new(
     return results
 
 
+def _imap_utf7_decode(name: str) -> str:
+    def repl(m: re.Match) -> str:
+        b64 = m.group(1)
+        if not b64:
+            return "&"
+        try:
+            b64 = b64.replace(",", "/")
+            return base64.b64decode(b64 + "=" * (-len(b64) % 4)).decode("utf-16-be")
+        except Exception:
+            return m.group(0)
+
+    return re.sub(r"&([A-Za-z0-9+,]*)-", repl, name)
+
+
+_LIST_LINE = re.compile(r'^\((?P<flags>[^)]*)\)\s+(?:"(?:[^"\\]|\\.)*"|NIL)\s+(?P<name>.+)$', re.S)
+
+
+def list_folders(st: Settings) -> list[str]:
+    """Names of the mailbox folders (read-only IMAP LIST), decoded for display."""
+    imap = _connect(st)
+    try:
+        typ, data = imap.list()
+        if typ != "OK":
+            raise ImapError("the server refused to list folders")
+        names: list[str] = []
+        for item in data or []:
+            literal = None
+            if isinstance(item, tuple):  # name sent as an IMAP literal
+                literal = item[1]
+                item = item[0]
+            if not isinstance(item, (bytes, bytearray)):
+                continue
+            m = _LIST_LINE.match(bytes(item).decode("utf-8", "replace").strip())
+            if not m or "\\noselect" in m.group("flags").lower():
+                continue
+            if literal is not None:
+                raw = bytes(literal).decode("utf-8", "replace")
+            else:
+                raw = m.group("name").strip()
+                if raw.startswith('"') and raw.endswith('"') and len(raw) >= 2:
+                    raw = re.sub(r"\\(.)", r"\1", raw[1:-1])
+            names.append(_imap_utf7_decode(raw))
+        return names
+    finally:
+        try:
+            imap.logout()
+        except Exception:
+            pass
+
+
 def fetch_recent(st: Settings, n: int) -> list[Mail]:
     """Latest ``n`` mails of the first folder, read-only (for /mail test)."""
     imap = _connect(st)

@@ -44,6 +44,14 @@ class FakeServer:
         self.fetch_specs: list[str] = []
         self.commands: list[str] = []
         self.pending: list[list] = []  # [polls_left, raw] mails still "in transit"
+        self.folder_lines: list = [
+            b'(\\HasNoChildren) "/" "INBOX"',
+            b'(\\HasNoChildren) "/" "&U,BTFw-"',
+            b'(\\Noselect \\HasChildren) "/" "[Gmail]"',
+            b'(\\HasNoChildren \\Sent) "/" "[Gmail]/Sent Mail"',
+            (b'(\\HasNoChildren) "/" {5}', b"Draft"),
+            b'(\\HasNoChildren) NIL Plain',
+        ]
 
     def deliver(self, raw: bytes) -> None:
         self.mails[self.uidnext] = raw
@@ -108,6 +116,9 @@ class FakeIMAP:
                 return "OK", [None]
             return "OK", [(f"1 (UID {uid} BODY[] {{{len(raw)}}}".encode(), raw), b")"]
         raise AssertionError(f"unexpected IMAP command {cmd}")
+
+    def list(self, *a):
+        return "OK", list(self.server.folder_lines)
 
     def logout(self):
         return "BYE", [b""]
@@ -1587,6 +1598,34 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(smtplib, "SMTP_SSL", BadSMTP):
             with self.assertRaises(core.SmtpError):
                 core.send_selftest_mail(st, "t", "mailnotify-selftest-x")
+
+    def test_utf7_decode_roundtrip(self):
+        for name in ("INBOX", "Sent & Co", "台北/日本語", "垃圾邮件", "[Gmail]/Sent Mail"):
+            self.assertEqual(core._imap_utf7_decode(core._imap_utf7(name)), name)
+        self.assertEqual(core._imap_utf7_decode("&!!bad-"), "&!!bad-")  # garbage stays as is
+
+    async def test_folders_command_lists_names_read_only(self):
+        h = Harness(self.tmp, base_config())
+        with mock.patch.object(imaplib, "IMAP4_SSL", FakeIMAP):
+            out = await h.svc.folders()
+        for name in ("INBOX", "台北", "[Gmail]/Sent Mail", "Draft", "Plain"):
+            self.assertIn(name, out)
+        self.assertNotIn("[Gmail]\n", out + "\n")  # the \Noselect container is not listed
+        self.assertIn("✓ INBOX", out)  # the monitored folder is marked
+        self.assertEqual(h.server.selects, [])  # listing never opens a mailbox
+        self.assertEqual(h.sent, [])
+
+    async def test_folders_command_reports_problems_cleanly(self):
+        h = Harness(self.tmp, base_config(email_password=""))
+        self.assertIn("配置不完整", await h.svc.folders())
+        h = Harness(self.tmp, base_config())
+        h.server.password = "something-else"
+        with mock.patch.object(imaplib, "IMAP4_SSL", FakeIMAP):
+            self.assertIn("连接邮箱失败", await h.svc.folders())
+        h.server.password = PASSWORD
+        h.server.folder_lines = []
+        with mock.patch.object(imaplib, "IMAP4_SSL", FakeIMAP):
+            self.assertIn("没有列出任何文件夹", await h.svc.folders())
 
 
 if __name__ == "__main__":

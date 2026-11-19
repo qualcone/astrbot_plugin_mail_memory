@@ -173,6 +173,15 @@ class MailNotifyPlugin(Star):
         yield event.plain_result(await self.service.selftest())
 
     @filter.permission_type(filter.PermissionType.ADMIN)
+    @mail.command("folders")
+    async def mail_folders(self, event: AstrMessageEvent):
+        """列出邮箱里的文件夹名（用来填“要监控的文件夹”）"""
+        if not event.is_admin():
+            yield event.plain_result("需要管理员权限。")
+            return
+        yield event.plain_result(await self.service.folders())
+
+    @filter.permission_type(filter.PermissionType.ADMIN)
     @mail.command("pause")
     async def mail_pause(self, event: AstrMessageEvent):
         """暂停自动检查"""
