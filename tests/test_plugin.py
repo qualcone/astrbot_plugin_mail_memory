@@ -25,6 +25,7 @@ from astrbot_plugin_mail_memory import core, service  # noqa: E402
 
 PASSWORD = "abcdefghijklmnop"
 API_KEY = "sk-test-secret-key-123"
+FK = "me@gmail.com|INBOX"  # state key of the test mailbox
 
 
 # --------------------------------------------------------------------- fakes
@@ -199,7 +200,7 @@ FLAT_TO_NESTED = {
     "hint_voice": ("notify", "hint_voice"), "hint_voice_custom": ("notify", "hint_voice_custom"),
     "smtp_host": ("email", "smtp_host"), "smtp_port": ("email", "smtp_port"),
     "selftest_subject": ("selftest", "subject"), "selftest_use_ai": ("selftest", "use_ai"),
-    "selftest_history": ("selftest", "write_to_history"), "selftest_wait": ("selftest", "wait_seconds"),
+    "selftest_wait": ("selftest", "wait_seconds"), "ai_enabled": ("ai", "enabled"),
     "sender_whitelist": ("rules", "sender_whitelist"), "sender_blacklist": ("rules", "sender_blacklist"),
     "block_verification_codes": ("rules", "block_verification_codes"),
     "verification_keywords": ("rules", "verification_keywords"),
@@ -374,7 +375,7 @@ class HelperTests(unittest.TestCase):
         d = core.Settings.from_config({})
         self.assertEqual(d.missing(), ["email.address", "email.password", "notify.target_umos"])
         self.assertFalse(d.ai_enabled)
-        self.assertEqual((d.content_scope, d.write_to_history, d.scenarios, d.categories), ("subject_only", False, [], []))
+        self.assertEqual((d.content_scope, d.write_to_history, d.scenarios, d.categories), ("subject_only", True, [], []))
         self.assertNotIn("大学", d.topic_description)
 
     def test_parse_verdict(self):
@@ -432,7 +433,7 @@ class RoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(r.ok, r.text)
         self.assertEqual(h.sent, [])  # history is never replayed
         self.assertEqual(h.llm_calls, 0)
-        self.assertEqual(h.svc.state.data["folders"]["INBOX"]["last_uid"], 3)
+        self.assertEqual(h.svc.state.data["folders"][FK]["last_uid"], 3)
 
         h.server.add(4, "Admissions <adm@uni.edu>", "录取结果通知")
         h.server.add(5, "Bank <b@bank.com>", "Your verification code is 123456")
@@ -446,7 +447,7 @@ class RoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("[链接]", text)
         self.assertNotIn("evil.example", text)
         self.assertEqual(h.llm_calls, 2)  # the verification code never reached the LLM
-        self.assertEqual(h.svc.state.data["folders"]["INBOX"]["last_uid"], 6)
+        self.assertEqual(h.svc.state.data["folders"][FK]["last_uid"], 6)
 
         await h.round()  # nothing new; the server's "return highest UID" quirk must not re-notify
         self.assertEqual(len(h.sent), 1)
@@ -505,8 +506,8 @@ class RoundTests(unittest.IsolatedAsyncioTestCase):
         for n in (1, 2):
             r = await h.round()
             self.assertFalse(r.ok)
-            self.assertEqual(h.svc.state.data["folders"]["INBOX"]["last_uid"], 1)  # not advanced
-            self.assertEqual(h.svc.state.data["retries"]["INBOX:2"], n)
+            self.assertEqual(h.svc.state.data["folders"][FK]["last_uid"], 1)  # not advanced
+            self.assertEqual(h.svc.state.data["retries"][FK + ":2"], n)
         self.assertEqual(h.sent, [])
         r = await h.round()  # third failure on the same mail: notify as unclassified, move on
         unclassified = [t for t in h.texts() if "【邮件提醒·未分类】" in t]
@@ -514,10 +515,10 @@ class RoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("AI 判断失败", unclassified[0])
         # the third consecutive failed round also raises exactly one alert
         self.assertEqual(len([t for t in h.texts() if "告警" in t]), 1)
-        self.assertEqual(h.svc.state.data["folders"]["INBOX"]["last_uid"], 2)
+        self.assertEqual(h.svc.state.data["folders"][FK]["last_uid"], 2)
         h.llm_down = False
         await h.round()
-        self.assertEqual(h.svc.state.data["folders"]["INBOX"]["last_uid"], 3)
+        self.assertEqual(h.svc.state.data["folders"][FK]["last_uid"], 3)
         self.assertNotIn(API_KEY, h.everything_logged())
 
     async def test_failure_alert_once_then_recovery_message(self):
@@ -543,8 +544,10 @@ class RoundTests(unittest.IsolatedAsyncioTestCase):
         for _ in range(3):
             r = await h.round()
             self.assertFalse(r.ok)
-        self.assertTrue(h.svc.state.data["auth_paused"])
-        self.assertFalse(h.svc.should_run_scheduled())
+        self.assertEqual(h.svc.state.data["acct_failures"], {"me@gmail.com": 3})
+        r = await h.round()  # the broken mailbox is left alone now
+        self.assertFalse(r.ok)
+        self.assertIn("暂停", r.text)
         self.assertEqual(len([t for t in h.texts() if "邮箱登录连续失败" in t]), 1)
         out = h.everything_logged()
         self.assertNotIn("wrongwrongwrong16", out)
@@ -563,11 +566,11 @@ class RoundTests(unittest.IsolatedAsyncioTestCase):
         h.send_ok = False
         r = await h.round()
         self.assertFalse(r.ok)
-        self.assertEqual(h.svc.state.data["folders"]["INBOX"]["last_uid"], 1)
+        self.assertEqual(h.svc.state.data["folders"][FK]["last_uid"], 1)
         h.send_ok = True
         await h.round()
         self.assertEqual(len([t for t in h.texts() if "录取" in t]), 1)
-        self.assertEqual(h.svc.state.data["folders"]["INBOX"]["last_uid"], 2)
+        self.assertEqual(h.svc.state.data["folders"][FK]["last_uid"], 2)
 
     async def test_quiet_hours_hold_bypass_and_flush(self):
         h = self.harness(quiet_hours_enabled=True, quiet_start="23:00", quiet_end="08:00",
@@ -601,14 +604,14 @@ class RoundTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("共 4 封", h.texts()[0])
 
     async def test_history_is_optional_and_failure_tolerant(self):
-        h = self.harness()
+        h = self.harness(write_to_history=False)
         h.server.add(1, "x <x@y.z>", "x")
         await h.round()
         h.server.add(2, "Adm <a@uni.edu>", "录取 one")
         await h.round()
-        self.assertEqual(h.history, [])  # off by default
+        self.assertEqual(h.history, [])  # switched off
 
-        h.cfg["write_to_history"] = True
+        h.cfg["write_to_history"] = True  # on is the default
         h.server.add(3, "Adm <a@uni.edu>", "录取 two")
         await h.round()
         self.assertEqual(len(h.history), 1)
@@ -632,7 +635,7 @@ class RoundTests(unittest.IsolatedAsyncioTestCase):
             h.server.add(i, "Adm <a@uni.edu>", f"录取 {i}")
         await h.round()
         self.assertEqual(h.sent, [])
-        self.assertEqual(h.svc.state.data["folders"]["INBOX"], {"uidvalidity": 888, "last_uid": 7})
+        self.assertEqual(h.svc.state.data["folders"][FK], {"uidvalidity": 888, "last_uid": 7})
 
     async def test_missing_config_and_pause(self):
         h = self.harness(email_address="")
@@ -733,19 +736,36 @@ class SchemaTests(unittest.TestCase):
         with open(path, encoding="utf-8") as f:
             cls.schema = json.load(f)
 
+    def _sections(self):
+        """(name, items) of every settings group, the mailbox template included."""
+        for name, sec in self.schema.items():
+            if sec["type"] == "object":
+                yield name, sec["items"]
+            elif sec["type"] == "template_list":
+                for tname, tpl in sec["templates"].items():
+                    yield name, tpl["items"]
+
     def test_menu_layout(self):
         keys = list(self.schema)
         self.assertEqual(keys[0], "write_to_history")  # history switch sits on top
-        self.assertEqual(keys[1:], ["email", "ai", "rules", "reading", "notify", "schedule", "selftest", "advanced"])
-        self.assertFalse(self.schema["write_to_history"]["default"])
-        for k in keys[1:]:
+        self.assertEqual(keys[1:], ["accounts", "ai", "rules", "reading", "notify", "schedule", "selftest", "advanced"])
+        self.assertTrue(self.schema["write_to_history"]["default"])  # the core feature: on by default
+        self.assertEqual(self.schema["accounts"]["type"], "template_list")
+        self.assertEqual(list(self.schema["accounts"]["templates"]), ["mailbox"])
+        for k in keys[2:]:
             self.assertEqual(self.schema[k]["type"], "object", k)
             self.assertIn("items", self.schema[k])
 
     def test_defaults_are_generic_and_safe(self):
-        items = {sec: self.schema[sec]["items"] for sec in list(self.schema)[1:]}
-        self.assertEqual(items["email"]["address"]["default"], "")
-        self.assertEqual(items["email"]["password"]["default"], "")
+        items = {sec: self.schema[sec]["items"] for sec in list(self.schema)[2:]}
+        mailbox = self.schema["accounts"]["templates"]["mailbox"]["items"]
+        self.assertEqual(mailbox["address"]["default"], "")
+        self.assertEqual(mailbox["password"]["default"], "")
+        self.assertTrue(mailbox["password"]["secret"])
+        (first,) = self.schema["accounts"]["default"]  # one blank mailbox to start from
+        self.assertEqual((first["address"], first["password"]), ("", ""))
+        self.assertEqual(first["__template_key"], "mailbox")
+        self.assertTrue(items["ai"]["enabled"]["default"])
         self.assertEqual(items["ai"]["api_key"]["default"], "")
         self.assertEqual(items["notify"]["target_umos"]["default"], [])
         self.assertEqual(items["reading"]["scope"]["default"], "subject_only")
@@ -754,19 +774,16 @@ class SchemaTests(unittest.TestCase):
         self.assertEqual(items["rules"]["scenarios"]["default"], [])  # nothing ticked by default
         self.assertEqual(items["rules"]["extra_topic"]["default"], "")
         self.assertFalse(items["selftest"]["use_ai"]["default"])
-        self.assertFalse(items["selftest"]["write_to_history"]["default"])
-        for sec in items.values():
+        self.assertNotIn("write_to_history", items["selftest"])  # a self-test never touches the history
+        for _, sec in self._sections():
             for k, v in sec.items():
                 shown = json.dumps([v.get("default"), v.get("hint"), v.get("description")], ensure_ascii=False)
                 self.assertNotIn("London", shown, k)  # the dropdown itself may list it
-        self.assertTrue(items["email"]["password"]["secret"])
         self.assertTrue(items["ai"]["api_key"]["secret"])
 
     def test_options_labels_and_conditions(self):
-        for sname, sec in self.schema.items():
-            if sec["type"] != "object":
-                continue
-            for key, item in sec["items"].items():
+        for sname, sec in self._sections():
+            for key, item in sec.items():
                 if "options" in item:
                     default = item["default"] if isinstance(item["default"], list) else [item["default"]]
                     for dv in default:  # a multi-select list may default to nothing ticked
@@ -774,15 +791,16 @@ class SchemaTests(unittest.TestCase):
                     if "labels" in item:
                         self.assertEqual(len(item["labels"]), len(item["options"]), f"{sname}.{key}")
                 for cond_key in item.get("condition", {}):
-                    self.assertIn(cond_key, sec["items"], f"{sname}.{key} condition")
+                    self.assertIn(cond_key, sec, f"{sname}.{key} condition")
 
     def test_scenario_checkboxes_match_the_code(self):
         sc = self.schema["rules"]["items"]["scenarios"]
-        self.assertEqual(sc["options"], list(core.SCENARIOS))
+        self.assertEqual(sc["options"], list(core.SCENARIOS) + [core.SCENARIO_OTHER])
         self.assertEqual(sc["render_type"], "checkbox")
         self.assertEqual(len(sc["labels"]), len(sc["options"]))
         for key, label in zip(sc["options"], sc["labels"]):
-            self.assertTrue(label.startswith(core.SCENARIOS[key]["label"]), key)
+            want = core.SCENARIOS[key]["label"] if key in core.SCENARIOS else "✍️ 其他（自定义）"
+            self.assertTrue(label.startswith(want), key)
         qb = self.schema["schedule"]["items"]["quiet_bypass_categories"]
         self.assertEqual(set(qb["options"]), {v["category"] for v in core.SCENARIOS.values()} | {core.OTHER_CATEGORY})
 
@@ -804,17 +822,18 @@ class SchemaTests(unittest.TestCase):
                 return super().get(k, d)
 
         for provider in ("gmail", "custom"):
-            cfg = {sec: Rec(sec, {"provider": provider} if sec == "email" else {})
-                   for sec in list(self.schema)[1:]}
+            cfg = {sec: Rec(sec, {}) for sec in list(self.schema)[2:]}
+            cfg["accounts"] = [Rec("accounts", {"provider": provider})]
             cfg["write_to_history"] = False
             core.Settings.from_config(cfg)
-        defined = {(sec, k) for sec in list(self.schema)[1:] for k in self.schema[sec]["items"]}
+        defined = {(name, k) for name, sec in self._sections() for k in sec}
         self.assertEqual(defined - seen, set(), "menu items the code never reads")
         self.assertEqual({x for x in seen if x[0] in self.schema} - defined, set(), "keys read but not in menu")
 
     def test_schema_defaults_produce_default_settings(self):
-        cfg = {"write_to_history": self.schema["write_to_history"]["default"]}
-        for sec in list(self.schema)[1:]:
+        cfg = {"write_to_history": self.schema["write_to_history"]["default"],
+               "accounts": self.schema["accounts"]["default"]}
+        for sec in list(self.schema)[2:]:
             cfg[sec] = {k: v["default"] for k, v in self.schema[sec]["items"].items()}
         self.assertEqual(core.Settings.from_config(cfg), core.Settings.from_config({}))
 
@@ -992,18 +1011,47 @@ class ScenarioTests(unittest.IsolatedAsyncioTestCase):
         st = core.Settings.from_config(base_config(scenarios=["deals", "security", "bogus", "deals"],
                                                    extra_topic="优惠只要 Steam 愿望单里的游戏"))
         self.assertEqual(st.scenarios, ["deals", "security"])  # unknown dropped, duplicates merged
-        self.assertEqual(st.categories, ["优惠", "安全", "其他相关"])
-        for needle in ("游戏与软件优惠", "Steam", "账号安全", "愿望单", "广告营销"):
+        self.assertEqual(st.categories, ["优惠", "安全"])  # the note only narrows; "其他" is not ticked
+        for needle in ("游戏与软件优惠", "Steam", "账号安全", "愿望单", "广告营销", "限定"):
             self.assertIn(needle, st.topic_description)
         self.assertNotIn("快递", st.topic_description)  # not ticked
         self.assertNotIn("📚", st.topic_description)  # no emoji in the prompt
 
-    def test_extra_note_alone_is_enough(self):
-        st = core.Settings.from_config(base_config(scenarios=[], extra_topic="只关心图书馆的通知"))
+    def test_custom_other_scenario(self):
+        st = core.Settings.from_config(base_config(scenarios=["other"], extra_topic="只关心图书馆的通知"))
         self.assertTrue(st.ai_enabled)
-        self.assertEqual(st.categories, ["其他相关"])
+        self.assertEqual((st.scenarios, st.categories), ([], ["其他相关"]))
         msgs = core.build_messages(st, core.Mail("INBOX", 1, "a@b.c", "x"))
         self.assertIn("图书馆", msgs[0]["content"])
+        both = core.Settings.from_config(base_config(scenarios=["study", "other"], extra_topic="实验室的邮件"))
+        self.assertEqual(both.categories, ["学业", "其他相关"])
+
+    def test_custom_text_alone_or_empty_other_does_not_switch_ai_on(self):
+        text_only = core.Settings.from_config(base_config(scenarios=[], extra_topic="只关心图书馆的通知"))
+        self.assertFalse(text_only.ai_enabled)  # "其他" not ticked: the text is only a narrowing note
+        empty_other = core.Settings.from_config(base_config(scenarios=["other"], extra_topic="  "))
+        self.assertFalse(empty_other.ai_enabled)  # ticked but nothing written
+
+    async def test_ai_master_switch_off_never_calls_a_model(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            h = Harness(tmp, base_config(ai_enabled=False, api_key="", sender_whitelist=["@uni.edu"]))
+            st = core.Settings.from_config(h.cfg)
+            self.assertFalse(st.ai_enabled)  # scenarios are ticked, the switch still wins
+            self.assertEqual(st.missing(), [])  # and no model settings are required
+            h.server.add(1, "x <x@y.z>", "x")
+            self.assertTrue((await h.round()).ok)
+            h.server.add(2, "Shop <s@shop.com>", "录取 for sure")
+            h.server.add(3, "Adm <a@uni.edu>", "hello")
+            await h.round()
+            self.assertEqual(h.llm_calls, 0)
+            self.assertEqual(len(h.sent), 1)
+            self.assertIn("【邮件提醒·白名单】", h.texts()[0])
+            self.assertTrue(any("总开关已关闭" in line for line in h.log.lines))
+            self.assertIn("总开关", h.svc.status_text())
+            h.cfg["ai"].update(enabled=True, api_key=API_KEY)  # switched on again: scenarios work as before
+            h.server.add(4, "Shop <s@shop.com>", "录取 for real")
+            await h.round()
+            self.assertEqual(h.llm_calls, 1)
 
     async def test_nothing_ticked_means_no_ai_and_only_whitelist_notifies(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1089,13 +1137,13 @@ class SelfTestTests(unittest.IsolatedAsyncioTestCase):
         await h.round()
         self.assertEqual(len(h.sent), 1)
         self.assertEqual(h.llm_calls, 0)
-        self.assertEqual(h.svc.state.data["folders"]["INBOX"]["last_uid"], max(h.server.mails))
+        self.assertEqual(h.svc.state.data["folders"][FK]["last_uid"], max(h.server.mails))
 
-    async def test_selftest_can_opt_in_to_history(self):
-        h = self.harness(selftest_history=True)
+    async def test_selftest_with_ai_switch_off_says_what_is_missing(self):
+        h = self.harness(selftest_use_ai=True, ai_enabled=False)
         report = await self.run_selftest(h)
-        self.assertIn("写入了对话历史", report)
-        self.assertEqual(len(h.history), 1)
+        self.assertIn("自测无法开始", report)
+        self.assertIn("启用 AI 判断", report)
 
     async def test_selftest_with_ai_tests_the_rules(self):
         h = self.harness(selftest_use_ai=True, selftest_subject="录取 结果")
@@ -1626,6 +1674,116 @@ class BoundaryTests(unittest.IsolatedAsyncioTestCase):
         h.server.folder_lines = []
         with mock.patch.object(imaplib, "IMAP4_SSL", FakeIMAP):
             self.assertIn("没有列出任何文件夹", await h.svc.folders())
+
+
+class TwoIMAP(FakeIMAP):
+    """Picks the fake server by host, so two mailboxes can differ."""
+
+    servers: dict = {}
+
+    def __init__(self, host, port, timeout=None, ssl_context=None, context=None):
+        self.server = self.servers[host]
+
+
+class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
+    PW_B = "bbbbbbbbbbbbbbbb"
+
+    def setUp(self):
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = self._tmp.name
+        self.h = Harness(self.tmp, base_config())
+        self.a, self.b = self.h.server, FakeServer()
+        self.b.password = self.PW_B
+        TwoIMAP.servers = {"imap.a.test": self.a, "imap.b.test": self.b}
+        self.h.cfg["accounts"] = [
+            {"provider": "custom", "address": "a@a.test", "password": PASSWORD, "imap_host": "imap.a.test"},
+            {"provider": "custom", "address": "b@b.test", "password": self.PW_B, "imap_host": "imap.b.test"},
+        ]
+
+    def tearDown(self):
+        self._tmp.cleanup()
+
+    async def round(self):
+        with mock.patch.object(imaplib, "IMAP4_SSL", TwoIMAP):
+            return await self.h.svc.run_round()
+
+    async def test_each_mailbox_keeps_its_own_progress_and_is_named(self):
+        self.a.add(1, "x <x@y.z>", "x")
+        self.b.add(1, "x <x@y.z>", "x")
+        self.assertTrue((await self.round()).ok)
+        self.a.add(2, "Adm <a@uni.edu>", "录取 from A")
+        self.b.add(2, "Adm <a@uni.edu>", "录取 from B")  # same UID 2 in both mailboxes
+        self.assertTrue((await self.round()).ok)
+        texts = self.h.texts()
+        self.assertEqual(len(texts), 2)
+        self.assertTrue(any("录取 from A" in t and "收件邮箱：a@a.test" in t for t in texts))
+        self.assertTrue(any("录取 from B" in t and "收件邮箱：b@b.test" in t for t in texts))
+        folders = self.h.svc.state.data["folders"]
+        self.assertEqual(sorted(folders), ["a@a.test|INBOX", "b@b.test|INBOX"])
+        self.assertEqual(folders["a@a.test|INBOX"]["last_uid"], 2)
+        await self.round()  # nothing new: nothing pushed twice
+        self.assertEqual(len(self.h.sent), 2)
+
+    async def test_one_broken_mailbox_does_not_stop_the_other_and_only_it_is_paused(self):
+        self.h.cfg["accounts"][1]["password"] = "wrongwrongwrong16"
+        self.a.add(1, "x <x@y.z>", "x")
+        await self.round()
+        self.a.add(2, "Adm <a@uni.edu>", "录取 still works")
+        r = await self.round()
+        self.assertFalse(r.ok)  # a problem is reported ...
+        self.assertIn("b@b.test", r.text)
+        self.assertTrue(any("录取 still works" in t for t in self.h.texts()))  # ... but A was served
+        await self.round()
+        self.assertEqual(self.h.svc.state.data["acct_failures"], {"b@b.test": 3})
+        alerts = [t for t in self.h.texts() if "邮箱登录连续失败" in t]
+        self.assertEqual(len(alerts), 1)
+        self.assertIn("b@b.test", alerts[0])
+        self.assertNotIn("wrongwrongwrong16", self.h.everything_logged())
+        self.a.add(3, "Adm <a@uni.edu>", "录取 after pause")
+        self.assertTrue((await self.round()).ok)  # B is skipped, A carries on
+        self.assertTrue(any("录取 after pause" in t for t in self.h.texts()))
+        self.assertIn("已暂停", self.h.svc.status_text())
+        self.h.cfg["accounts"][1]["password"] = self.PW_B
+        self.h.svc.set_paused(False)  # /mail resume
+        self.assertTrue((await self.round()).ok)
+        self.assertEqual(self.h.svc.state.data["acct_failures"], {})
+
+    async def test_selftest_folders_and_test_pick_a_mailbox(self):
+        with mock.patch.object(imaplib, "IMAP4_SSL", TwoIMAP):
+            out = await self.h.svc.folders(2)
+            self.assertIn("b@b.test", out)
+            self.assertIn("没有第 3 个邮箱账户", await self.h.svc.folders(3))
+            self.assertIn("没有第 0 个邮箱账户", await self.h.svc.selftest(0))
+            self.a.add(1, "Adm <a@uni.edu>", "录取 one")
+            self.b.add(1, "S <s@shop.com>", "Big sale")
+            report = await self.h.svc.dry_run(5)
+        self.assertIn("【a@a.test】", report)
+        self.assertIn("【b@b.test】", report)
+        self.assertIn("通知（学业）", report)
+        self.assertIn("忽略（AI 判为不相关）", report)
+
+    def test_accounts_are_validated(self):
+        cfg = base_config()
+        cfg["accounts"] = [
+            {"provider": "gmail", "address": "Me@Gmail.com", "password": "p"},
+            {"provider": "gmail", "address": "me@gmail.com", "password": "p"},  # same mailbox twice
+            "junk",
+            {"provider": "qq", "address": "n@qq.com", "password": "p", "folders": "INBOX, Junk，Drafts\nINBOX"},
+        ]
+        sts = core.Settings.accounts_from_config(cfg)
+        self.assertEqual([s.account_id for s in sts], ["me@gmail.com", "n@qq.com"])
+        self.assertTrue(all(s.multi_account for s in sts))
+        self.assertEqual(sts[1].imap_folders, ["INBOX", "Junk", "Drafts"])
+        self.assertEqual(sts[0].imap_host, "imap.gmail.com")
+        cfg["accounts"] = [{"address": f"u{i}@x.com", "password": "p"} for i in range(30)]
+        self.assertEqual(len(core.Settings.accounts_from_config(cfg)), core.MAX_ACCOUNTS)
+        self.assertFalse(core.Settings.accounts_from_config(base_config())[0].multi_account)  # one: no labels
+
+    async def test_an_incomplete_extra_mailbox_is_skipped_not_fatal(self):
+        self.h.cfg["accounts"].append({"provider": "gmail", "address": "", "password": ""})
+        self.a.add(1, "x <x@y.z>", "x")
+        self.assertTrue((await self.round()).ok)
+        self.assertTrue(any("第 3 个邮箱账户的配置不完整" in line for line in self.h.log.lines))
 
 
 if __name__ == "__main__":

@@ -90,7 +90,18 @@ class MailService:
 
     # ------------------------------------------------------------------ utils
     def settings(self) -> Settings:
+        """The first mailbox' snapshot; everything except the mailbox is shared by all of them."""
         return Settings.from_config(self.get_config())
+
+    def accounts(self) -> list[Settings]:
+        return Settings.accounts_from_config(self.get_config())
+
+    def _pick_account(self, idx: int) -> tuple[Settings | None, str]:
+        """The idx-th (1-based) mailbox, or (None, why not)."""
+        sts = self.accounts()
+        if not 1 <= idx <= len(sts):
+            return None, f"没有第 {idx} 个邮箱账户（目前配置了 {len(sts)} 个），用法：/mail 指令 [邮箱序号]"
+        return sts[idx - 1], ""
 
     def _tz(self) -> str:
         """AstrBot's own time zone setting; Beijing time when it is empty."""
@@ -116,7 +127,7 @@ class MailService:
 
     def should_run_scheduled(self) -> bool:
         s = self.state.data
-        return not s["paused"] and not s["auth_paused"] and not self.superseded
+        return not s["paused"] and not self.superseded
 
     # -------------------------------------------------------------- delivery
     async def _voiced(self, st: Settings, d: Decision) -> Decision:
@@ -192,6 +203,7 @@ class MailService:
             lines.append(
                 f"{i}. {when + ' ' if when else ''}[{e.get('category', '')}] "
                 f"{e.get('sender', '')} — {e.get('subject', '')}"
+                + (f"（{e['account']}）" if e.get("account") else "")
             )
         if len(q) > 20:
             lines.append(f"……另有 {len(q) - 20} 封")
@@ -202,22 +214,26 @@ class MailService:
         return False
 
     # ----------------------------------------------------------- failure book
-    async def _note_failure(self, st: Settings, reason: str, auth: bool = False) -> None:
-        s = self.state.data
-        s["failures"] += 1
-        if auth:
-            s["auth_failures"] += 1
-        reason = sanitize(redact(reason, st.secrets()), 200)
-        if auth and s["auth_failures"] >= PAUSE_AFTER_AUTH_FAILURES and not s["auth_paused"]:
-            s["auth_paused"] = True
-            s["alerted"] = True
-            self.log.error(f"邮箱认证连续失败，已暂停自动检查：{reason}")
+    async def _note_auth_failure(self, st: Settings, a: Settings) -> None:
+        """One login failure of mailbox ``a``; after a few in a row only that mailbox is paused."""
+        fails = self.state.data["acct_failures"]
+        n = fails[a.account_id] = fails.get(a.account_id, 0) + 1
+        if n == PAUSE_AFTER_AUTH_FAILURES:
+            self.state.data["alerted"] = True
+            who = f"（{a.email_address}）" if a.multi_account else ""
+            self.log.error(f"邮箱{who}认证连续失败，已暂停这个邮箱的自动检查")
             await self._deliver(
                 st,
-                "【邮件提醒·告警】邮箱登录连续失败，已暂停自动检查。"
+                f"【邮件提醒·告警】邮箱登录连续失败{who}，已暂停自动检查。"
                 "请确认邮箱已开启 IMAP、应用专用密码/授权码正确，修改配置后发送 /mail resume 恢复。",
             )
-        elif s["failures"] >= ALERT_AFTER_FAILURES and not s["alerted"]:
+        self.state.save()
+
+    async def _note_failure(self, st: Settings, reason: str) -> None:
+        s = self.state.data
+        s["failures"] += 1
+        reason = sanitize(redact(reason, st.secrets()), 200)
+        if s["failures"] >= ALERT_AFTER_FAILURES and not s["alerted"]:
             s["alerted"] = True
             self.log.error(f"邮件检查连续失败 {s['failures']} 次：{reason}")
             await self._deliver(
@@ -228,13 +244,13 @@ class MailService:
         s["last_result"] = f"失败：{reason}"
         self.state.save()
 
-    async def _note_success(self, st: Settings) -> None:
+    async def _note_success(self, st: Settings, fetched: list[Settings]) -> None:
         s = self.state.data
         was_alerted = s["alerted"]
         s["failures"] = 0
-        s["auth_failures"] = 0
+        for a in fetched:  # a mailbox that logged in again is no longer "failing"
+            s["acct_failures"].pop(a.account_id, None)
         s["alerted"] = False
-        s["auth_paused"] = False
         s["last_result"] = "成功"
         if was_alerted:
             await self._deliver(st, "【邮件提醒】邮件检查已恢复正常。")
@@ -249,19 +265,29 @@ class MailService:
     async def _run_round(self, manual: bool) -> RoundReport:
         if self._lost_ownership():
             return RoundReport(False, "本实例已被新实例取代，不再检查。")
-        st = self.settings()
+        sts = self.accounts()
+        st = sts[0]  # shared settings (AI, push targets, rules) are the same in every snapshot
         s = self.state.data
-        miss = st.missing()
+        usable = [a for a in sts if not a.missing_email()]
+        miss = (st.missing_email() if not usable else []) + st.missing_global()
         if miss:
-            msg = "配置不完整，请在插件配置里填写：" + st.missing_text()
+            msg = "配置不完整，请在插件配置里填写：" + st.missing_text(miss)
             self._warn_once("missing:" + ",".join(miss), msg)
             return RoundReport(False, msg)
+        for i, a in enumerate(sts, 1):
+            if a.missing_email():
+                self._warn_once(
+                    f"incomplete:{i}:{a.account_id}",
+                    f"第 {i} 个邮箱账户的配置不完整，已跳过：{a.missing_text(a.missing_email())}",
+                )
 
         if not st.ai_enabled:
-            self._warn_once(
-                "no-topic",
-                "没有勾选任何筛选场景、也没有填补充说明：AI 判断已关闭，只有白名单发件人的邮件会通知。",
+            why = (
+                "AI 判断的总开关已关闭"
+                if not st.ai_switch
+                else "没有勾选任何筛选场景（或勾了“其他”却没写说明）"
             )
+            self._warn_once("no-topic", f"{why}：不会调用 AI，只有白名单发件人的邮件会通知。")
         now = self._now(self._tz())
         quiet = st.quiet_hours_enabled and core.in_quiet_hours(
             now, st.quiet_start, st.quiet_end
@@ -274,28 +300,43 @@ class MailService:
                 await self._note_failure(st, "无法发送免打扰期间攒下的通知")
                 return RoundReport(False, "无法发送攒下的通知")
 
-        try:
-            results = await asyncio.to_thread(
-                self._fetcher,
-                st,
-                s["folders"],
-                st.max_mails_per_round,
-                st.first_run_backfill,
+        results: dict[str, core.FolderResult] = {}
+        fetched: list[Settings] = []
+        failed: list[tuple[str, str]] = []  # (raw reason for the failure book, text for the user)
+        paused_accounts = 0
+        for a in usable:
+            if s["acct_failures"].get(a.account_id, 0) >= PAUSE_AFTER_AUTH_FAILURES:
+                paused_accounts += 1  # login kept failing: left alone until /mail resume
+                continue
+            who = f"{a.email_address}：" if a.multi_account else ""
+            try:
+                part = await asyncio.to_thread(
+                    self._fetcher, a, s["folders"], a.max_mails_per_round, a.first_run_backfill
+                )
+            except AuthError as e:
+                await self._note_auth_failure(st, a)
+                failed.append((str(e), who + "邮箱登录失败，请检查应用专用密码/授权码"))
+                continue
+            except (ImapError, OSError, imaplib.IMAP4.error) as e:
+                reason = redact(f"{type(e).__name__}: {e}", a.secrets())
+                failed.append((reason, f"{who}连接邮箱失败：{sanitize(reason, 120)}"))
+                continue
+            results.update(part)
+            fetched.append(a)
+        if not fetched:
+            if failed:
+                await self._note_failure(st, failed[0][0])
+                return RoundReport(False, failed[0][1])
+            return RoundReport(
+                False, "所有邮箱都因登录失败暂停了检查，修改配置后发送 /mail resume 恢复。"
             )
-        except AuthError as e:
-            await self._note_failure(st, str(e), auth=True)
-            return RoundReport(False, "邮箱登录失败，请检查应用专用密码/授权码")
-        except (ImapError, OSError, imaplib.IMAP4.error) as e:
-            reason = redact(f"{type(e).__name__}: {e}", st.secrets())
-            await self._note_failure(st, reason)
-            return RoundReport(False, f"连接邮箱失败：{sanitize(reason, 120)}")
 
         total = prefiltered = irrelevant = 0
         items: list[tuple[Mail, Decision]] = []
         commits: dict[str, dict] = {}
         retries = dict(s["retries"])
         llm_failed = False
-        problems: list[str] = []
+        problems: list[str] = [text for _, text in failed]
 
         for folder, res in results.items():
             if res.error:
@@ -370,6 +411,7 @@ class MailService:
                         "time": core.format_mail_time(mail.date, self._tz(), short=True),
                         "sender": sanitize(mail.sender, 40),
                         "subject": sanitize(mail.subject, 80),
+                        "account": sanitize(mail.account, 60),
                     }
                 )
             else:
@@ -410,7 +452,7 @@ class MailService:
         if problems:
             await self._note_failure(st, problems[0])
         else:
-            await self._note_success(st)
+            await self._note_success(st, fetched)
             self.state.save()
 
         relevant = len(items)
@@ -431,20 +473,30 @@ class MailService:
 
     # ------------------------------------------------------------ /mail test
     async def dry_run(self, n: int) -> str:
-        st = self.settings()
-        miss = st.missing()
+        sts = self.accounts()
+        st = sts[0]
+        usable = [a for a in sts if not a.missing_email()]
         # target_umos is not needed to test judgement.
-        miss = [m for m in miss if m != "notify.target_umos"]  # not needed to test judging
+        miss = (st.missing_email() if not usable else []) + [
+            m for m in st.missing_global() if m != "notify.target_umos"
+        ]
         if miss:
             return "配置不完整，请在插件配置里填写：" + "、".join(
                 core.FIELD_LABELS.get(m, m) for m in miss
             )
+        parts: list[str] = []
+        for a in usable:
+            parts.append(await self._dry_run_one(a, n))
+        return "\n\n".join(parts)
+
+    async def _dry_run_one(self, st: Settings, n: int) -> str:
+        title = f"【{st.email_address}】\n" if st.multi_account else ""
         try:
             mails = await asyncio.to_thread(self._recent_fetcher, st, n)
         except (ImapError, OSError, imaplib.IMAP4.error) as e:
-            return "连接邮箱失败：" + sanitize(redact(f"{type(e).__name__}: {e}", st.secrets()), 120)
+            return title + "连接邮箱失败：" + sanitize(redact(f"{type(e).__name__}: {e}", st.secrets()), 120)
         if not mails:
-            return "收件箱里没有邮件。"
+            return title + "收件箱里没有邮件。"
         lines = [f"最近 {len(mails)} 封邮件的判断结果（仅试判断，不发通知）："]
         for m in mails:
             d = core.prefilter(m, st)
@@ -462,17 +514,19 @@ class MailService:
                 "verification-code": "忽略（验证码屏蔽）",
                 "ai-verification": "忽略（AI 判为验证码）",
                 "ai-irrelevant": "忽略（AI 判为不相关）",
-                "no-topic": "忽略（没有勾选任何筛选场景，AI 判断已关闭）",
+                "no-topic": "忽略（AI 判断没有开启：总开关关闭，或没有勾选任何筛选场景）",
             }.get(d.reason)
             if verdict is None:
                 verdict = f"通知（{d.category}）{('：' + d.hint) if d.hint else ''}"
             lines.append(f"- {sanitize(m.subject, 50)} ← {sanitize(m.sender, 30)}：{verdict}")
-        return "\n".join(lines)
+        return title + "\n".join(lines)
 
     # -------------------------------------------------------- /mail folders
-    async def folders(self) -> str:
-        st = self.settings()
-        miss = [m for m in st.missing() if m.startswith("email.")]
+    async def folders(self, idx: int = 1) -> str:
+        st, err = self._pick_account(idx)
+        if st is None:
+            return err
+        miss = st.missing_email()
         if miss:
             return "配置不完整，请在插件配置里填写：" + "、".join(core.FIELD_LABELS.get(m, m) for m in miss)
         try:
@@ -482,7 +536,8 @@ class MailService:
         if not names:
             return "邮箱里没有列出任何文件夹。"
         watched = set(st.imap_folders)
-        lines = [f"这个邮箱里的文件夹（共 {len(names)} 个，原样填进“要监控的文件夹”即可；带 ✓ 的正在监控）："]
+        who = f"{st.email_address} " if st.multi_account else "这个邮箱"
+        lines = [f"{who}里的文件夹（共 {len(names)} 个，原样填进“要监控的文件夹”即可；带 ✓ 的正在监控）："]
         for n in names[:60]:
             lines.append(f"{'✓' if n in watched else '·'} {sanitize(n, 60)}")
         if len(names) > 60:
@@ -490,12 +545,14 @@ class MailService:
         return "\n".join(lines)
 
     # --------------------------------------------------------- /mail selftest
-    async def selftest(self) -> str:
+    async def selftest(self, idx: int = 1) -> str:
         """Mail yourself and follow the mail through IMAP to the push. Returns a report.
 
-        By default no AI judging and no conversation history are involved.
+        By default no AI judging is involved, and a self-test never touches the conversation history.
         """
-        st = self.settings()
+        st, err = self._pick_account(idx)
+        if st is None:
+            return err
         miss = st.missing_for_selftest()
         if miss:
             return "自测无法开始，请先在插件配置里填写：" + st.missing_text(miss)
@@ -506,7 +563,7 @@ class MailService:
         s["selftests"] = (list(s.get("selftests", [])) + [token])[-10:]
         self.state.save()
 
-        lines = ["邮件提醒自测报告："]
+        lines = ["邮件提醒自测报告：" + (f"（{st.email_address}）" if st.multi_account else "")]
         t0 = time.monotonic()
         self.log.info(f"自测开始（token {token}）")
 
@@ -564,7 +621,7 @@ class MailService:
 
         # 4. push
         ok_count, errors = await self._deliver_detail(
-            st, core.format_mail(mail, d, st, self._tz()), to_history=st.selftest_history
+            st, core.format_mail(mail, d, st, self._tz()), to_history=False
         )
         total = len(st.target_umos)
         if ok_count == total:
@@ -575,33 +632,39 @@ class MailService:
             lines.append(f"❌ 推送失败（0/{total} 个会话）")
         lines.extend("   · " + sanitize(e, 200) for e in errors)
         self.log.info(f"自测结束：推送 {ok_count}/{total}")
-        lines.append(
-            f"本次自测{'走了' if st.selftest_use_ai else '没有走'} AI 判断，"
-            f"{'写入了' if st.selftest_history else '没有写入'}对话历史。"
-        )
+        lines.append(f"本次自测{'走了' if st.selftest_use_ai else '没有走'} AI 判断，没有写入对话历史。")
         return "\n".join(lines)
 
     # ----------------------------------------------------------- /mail status
     def status_text(self) -> str:
-        st = self.settings()
+        sts = self.accounts()
+        st = sts[0]
         s = self.state.data
         flags = []
         if s["paused"]:
             flags.append("已手动暂停")
-        if s["auth_paused"]:
-            flags.append("因登录失败已暂停")
+        accounts = []
+        for i, a in enumerate(sts, 1):
+            stuck = s["acct_failures"].get(a.account_id, 0) >= PAUSE_AFTER_AUTH_FAILURES
+            if stuck:
+                flags.append(f"{a.email_address or f'第 {i} 个邮箱'} 因登录失败已暂停")
+            accounts.append(
+                f"- 邮箱{i if len(sts) > 1 else ''}：{a.email_address or '（未配置）'}（{a.email_provider}），"
+                f"文件夹：{'、'.join(a.imap_folders)}" + ("（登录失败，已暂停）" if stuck else "")
+            )
         miss = st.missing()
         return "\n".join(
             [
                 "邮件提醒状态：",
-                f"- 邮箱：{st.email_address or '（未配置）'}（{st.email_provider}），文件夹：{'、'.join(st.imap_folders)}",
+                *accounts,
                 "- AI：" + (
-                    "未启用（没有勾选筛选场景，只通知白名单）" if not st.ai_enabled
+                    "未启用（总开关已关闭，只通知白名单）" if not st.ai_switch
+                    else "未启用（没有勾选筛选场景，只通知白名单）" if not st.ai_enabled
                     else "AstrBot 提供商 " + (st.astrbot_provider or "（未选）") if st.ai_source == core.AI_ASTRBOT
                     else st.ai_provider + " / " + st.llm_model
                 ),
-                f"- 筛选场景：{'、'.join(core.SCENARIOS[k]['category'] for k in st.scenarios) or '（无）'}"
-                + ("，另有补充说明" if st.extra_topic else ""),
+                f"- 筛选场景：{'、'.join(st.categories) or '（无）'}"
+                + ("，另有补充说明" if st.extra_topic and not st.custom_scenario else ""),
                 f"- 读取范围：{'仅标题' if st.content_scope == core.SCOPE_SUBJECT_ONLY else '标题 + 正文开头'}",
                 f"- 检查间隔：{st.check_interval_minutes} 分钟",
                 f"- 上次检查：{s['last_check'] or '尚未检查'}（{s['last_result'] or '无'}）",
@@ -617,6 +680,5 @@ class MailService:
         s = self.state.data
         s["paused"] = paused
         if not paused:
-            s["auth_paused"] = False
-            s["auth_failures"] = 0
+            s["acct_failures"] = {}  # also wakes mailboxes paused after login failures
         self.state.save()

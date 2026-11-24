@@ -74,7 +74,7 @@ class MailNotifyPlugin(Star):
                     raise
                 except Exception as e:  # never let the loop die
                     try:
-                        secrets = self.service.settings().secrets()
+                        secrets = [x for a in self.service.accounts() for x in a.secrets()]
                     except Exception:
                         secrets = []
                     logger.error(f"邮件检查出现未预期的错误：{type(e).__name__}: {redact(str(e), secrets)}")
@@ -164,22 +164,22 @@ class MailNotifyPlugin(Star):
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @mail.command("selftest")
-    async def mail_selftest(self, event: AstrMessageEvent):
-        """给自己发一封测试邮件，检查 邮箱 → 机器人 → 聊天 是否通畅"""
+    async def mail_selftest(self, event: AstrMessageEvent, idx: int = 1):
+        """给自己发一封测试邮件，检查 邮箱 → 机器人 → 聊天 是否通畅（多个邮箱时可带序号）"""
         if not event.is_admin():
             yield event.plain_result("需要管理员权限。")
             return
         yield event.plain_result("开始自测：正在给自己发一封测试邮件，最多等一分钟左右……")
-        yield event.plain_result(await self.service.selftest())
+        yield event.plain_result(await self.service.selftest(int(idx)))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @mail.command("folders")
-    async def mail_folders(self, event: AstrMessageEvent):
-        """列出邮箱里的文件夹名（用来填“要监控的文件夹”）"""
+    async def mail_folders(self, event: AstrMessageEvent, idx: int = 1):
+        """列出邮箱里的文件夹名（用来填“要监控的文件夹”；多个邮箱时可带序号）"""
         if not event.is_admin():
             yield event.plain_result("需要管理员权限。")
             return
-        yield event.plain_result(await self.service.folders())
+        yield event.plain_result(await self.service.folders(int(idx)))
 
     @filter.permission_type(filter.PermissionType.ADMIN)
     @mail.command("pause")

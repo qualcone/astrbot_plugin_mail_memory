@@ -19,7 +19,7 @@ import ssl
 import tempfile
 import time
 import uuid
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
 from zoneinfo import ZoneInfo
 from email.header import decode_header
@@ -81,11 +81,19 @@ SCENARIOS: dict[str, dict] = {
 OTHER_CATEGORY = "其他相关"
 
 
-def build_topic(scenarios: list[str], extra: str) -> tuple[str, list[str]]:
-    """(prompt text, category whitelist) for the chosen scenarios; ("", []) if none."""
+SCENARIO_OTHER = "other"  # the "其他（自定义）" checkbox; its text is rules.extra_topic
+
+
+def build_topic(scenarios: list[str], extra: str, custom: bool = False) -> tuple[str, list[str]]:
+    """(prompt text, category whitelist) for the chosen scenarios; ("", []) if none.
+
+    ``custom`` = the "其他（自定义）" box is ticked: the free text is then a scenario of its
+    own. Without it the text only narrows the ticked scenarios.
+    """
     chosen = [k for k in dict.fromkeys(scenarios) if k in SCENARIOS]
     extra = extra.strip()
-    if not chosen and not extra:
+    own = bool(custom and extra)
+    if not chosen and not own:
         return "", []
     lines = ["用户关心以下类型的邮件："]
     cats: list[str] = []
@@ -94,11 +102,13 @@ def build_topic(scenarios: list[str], extra: str) -> tuple[str, list[str]]:
         name = sc["label"].split(" ", 1)[-1]
         lines.append(f"- {name}（类别“{sc['category']}”）：{sc['desc']}")
         cats.append(sc["category"])
-    if extra:
+    if own:
         lines.append(
-            f"- 用户补充说明（类别“{OTHER_CATEGORY}”；如果同时符合上面某个类别，用那个类别）：{extra}"
+            f"- 用户自定义的类型（类别“{OTHER_CATEGORY}”；如果同时符合上面某个类别，用那个类别）：{extra}"
         )
         cats.append(OTHER_CATEGORY)
+    elif extra:
+        lines.append(f"- 用户的补充说明（只用来限定上面类型的范围，本身不是新的类型）：{extra}")
     lines.append(
         "只有明确符合以上类型的邮件才算相关；广告营销、群发简报、社交平台通知，"
         "以及与上述无关的邮件都不算相关。如果用户补充说明限定了范围，以补充说明为准。"
@@ -143,6 +153,14 @@ def _as_list(v: Any, default: list[str] | None = None) -> list[str]:
         if isinstance(x, str) and x.strip():
             out.append(x.strip())
     return out
+
+
+def _folders_value(v: Any) -> list[str]:
+    """Folder names from a list, or from one string separated by commas / newlines."""
+    if isinstance(v, str):
+        v = [p for p in re.split(r"[,，\n]", v)]
+    names = list(dict.fromkeys(_as_list(v)))
+    return names or ["INBOX"]
 
 
 EMAIL_PRESETS: dict[str, dict] = {
@@ -193,7 +211,8 @@ FIELD_LABELS = {
     "email.password": "邮箱账户 → 应用专用密码/授权码",
     "email.imap_host": "邮箱账户 → IMAP 服务器地址",
     "email.smtp_host": "邮箱账户 → SMTP 服务器地址（自测用）",
-    "rules.scenarios": "筛选规则 → 勾选场景或填写补充说明",
+    "rules.scenarios": "筛选规则 → 勾选场景（或勾选“其他”并填写说明）",
+    "ai.enabled": "AI 模型 → 启用 AI 判断",
     "ai.api_key": "AI 模型 → API Key",
     "ai.model": "AI 模型 → 模型名",
     "ai.base_url": "AI 模型 → 接口地址",
@@ -207,9 +226,24 @@ def _section(cfg: Any, name: str) -> dict:
     return v if isinstance(v, dict) else {}
 
 
+MAX_ACCOUNTS = 10
+
+
+def _account_entries(cfg: Any) -> list[dict]:
+    """The configured mailboxes: the ``accounts`` list, or (older layout) the ``email`` section."""
+    raw = cfg.get("accounts") if hasattr(cfg, "get") else None
+    if isinstance(raw, list):
+        entries = [e for e in raw if isinstance(e, dict)]
+        if entries:
+            return entries[:MAX_ACCOUNTS]
+    return [_section(cfg, "email")]
+
+
 @dataclass
 class Settings:
-    # email
+    # email (one mailbox; the shared parts below are identical for every mailbox)
+    account_id: str = ""  # stable key of this mailbox in the state file
+    multi_account: bool = False
     email_provider: str = "gmail"
     email_address: str = ""
     email_password: str = ""
@@ -221,6 +255,7 @@ class Settings:
     smtp_port: int = 465
 
     # AI
+    ai_switch: bool = True  # master switch: off = no model is ever called
     ai_source: str = AI_STANDALONE
     astrbot_provider: str = ""
     ai_provider: str = "deepseek"
@@ -236,7 +271,7 @@ class Settings:
     max_notify_per_round: int = 5
     notify_on_classify_failure: bool = True
     max_classify_retries: int = 3
-    write_to_history: bool = False
+    write_to_history: bool = True
     hint_voice: str = "persona"  # persona | off | custom
     hint_voice_custom: str = ""
 
@@ -248,6 +283,7 @@ class Settings:
 
     # rules
     scenarios: list[str] = field(default_factory=list)
+    custom_scenario: bool = False  # the "其他（自定义）" box
     extra_topic: str = ""
     topic_description: str = ""  # built from scenarios + extra_topic
     categories: list[str] = field(default_factory=list)  # derived as well
@@ -262,7 +298,6 @@ class Settings:
     # self-test
     selftest_subject: str = "邮件提醒自测"
     selftest_use_ai: bool = False
-    selftest_history: bool = False
     selftest_wait_seconds: int = 60
 
     # schedule (the time zone follows AstrBot's own setting, see service.py)
@@ -273,11 +308,27 @@ class Settings:
     quiet_bypass_categories: list[str] = field(default_factory=list)
 
     @classmethod
-    def from_config(cls, cfg: Any) -> "Settings":
+    def accounts_from_config(cls, cfg: Any) -> list["Settings"]:
+        """One snapshot per configured mailbox (blank duplicates of the same address dropped)."""
+        entries = _account_entries(cfg)
+        out: list[Settings] = []
+        seen: set[str] = set()
+        for i, entry in enumerate(entries):
+            addr = _as_str(entry.get("address", "")).lower()
+            if addr and addr in seen:
+                continue
+            seen.add(addr)
+            out.append(cls.from_config(cfg, i))
+        multi = len(out) > 1
+        return [replace(s, multi_account=multi) for s in out]
+
+    @classmethod
+    def from_config(cls, cfg: Any, index: int = 0) -> "Settings":
         """Build a validated snapshot from the (nested) AstrBotConfig / dict."""
         d = cls()
         top = cfg.get if hasattr(cfg, "get") else (lambda k, default=None: default)
-        em = _section(cfg, "email").get
+        entries = _account_entries(cfg)
+        em = (entries[index] if 0 <= index < len(entries) else {}).get
         ai = _section(cfg, "ai").get
         ru = _section(cfg, "rules").get
         rd = _section(cfg, "reading").get
@@ -324,22 +375,27 @@ class Settings:
         scope = _as_str(rd("scope", SCOPE_SUBJECT_ONLY), SCOPE_SUBJECT_ONLY)
         if scope not in (SCOPE_SUBJECT_ONLY, SCOPE_SUBJECT_AND_PREVIEW):
             scope = SCOPE_SUBJECT_ONLY  # safest default
-        scenarios = [k for k in dict.fromkeys(_as_list(ru("scenarios", None))) if k in SCENARIOS]
+        picked = list(dict.fromkeys(_as_list(ru("scenarios", None))))
+        scenarios = [k for k in picked if k in SCENARIOS]
+        custom = SCENARIO_OTHER in picked
         extra = _as_str(ru("extra_topic", ""))
         extra = sanitize(extra, 500) if extra else ""
-        topic, categories = build_topic(scenarios, extra)
+        topic, categories = build_topic(scenarios, extra, custom)
+        address = _as_str(em("address", ""))
 
         return cls(
+            account_id=address.lower() or f"#{index + 1}",
             email_provider=provider,
-            email_address=_as_str(em("address", "")),
+            email_address=address,
             # Providers show app passwords as "abcd efgh ijkl mnop".
             email_password=_as_str(em("password", "")).replace(" ", ""),
             imap_host=host,
             imap_port=port,
             imap_send_id=bool(preset.get("send_id")),
-            imap_folders=_as_list(em("folders", None), ["INBOX"]) or ["INBOX"],
+            imap_folders=_folders_value(em("folders", None)),
             smtp_host=smtp_host,
             smtp_port=smtp_port,
+            ai_switch=_as_bool(ai("enabled", True), True),
             ai_source=source,
             astrbot_provider=_as_str(ai("astrbot_provider", "")),
             ai_provider=ai_provider,
@@ -355,7 +411,7 @@ class Settings:
             max_notify_per_round=_as_int(no("max_notify_per_round", 5), 5, 1, 50),
             notify_on_classify_failure=_as_bool(no("notify_on_classify_failure", True), True),
             max_classify_retries=_as_int(no("max_classify_retries", 3), 3, 1, 20),
-            write_to_history=_as_bool(top("write_to_history", False), False),
+            write_to_history=_as_bool(top("write_to_history", True), True),
             hint_voice=voice_mode,
             hint_voice_custom=sanitize(_as_str(no("hint_voice_custom", "")), 300),
             content_scope=scope,
@@ -363,6 +419,7 @@ class Settings:
             first_run_backfill=_as_int(rd("first_run_backfill", 0), 0, 0, 50),
             max_mails_per_round=_as_int(rd("max_mails_per_round", 30), 30, 1, 200),
             scenarios=scenarios,
+            custom_scenario=custom,
             extra_topic=extra,
             topic_description=topic,
             categories=categories,
@@ -377,7 +434,6 @@ class Settings:
             selftest_subject=sanitize(_as_str(st_("subject", d.selftest_subject), d.selftest_subject), 80)
             or d.selftest_subject,
             selftest_use_ai=_as_bool(st_("use_ai", False), False),
-            selftest_history=_as_bool(st_("write_to_history", False), False),
             selftest_wait_seconds=_as_int(st_("wait_seconds", 60), 60, 10, 300),
             quiet_hours_enabled=_as_bool(sc("quiet_hours_enabled", False), False),
             quiet_start=_as_str(sc("quiet_start", d.quiet_start), d.quiet_start),
@@ -385,8 +441,8 @@ class Settings:
             quiet_bypass_categories=_as_list(sc("quiet_bypass_categories", None)),
         )
 
-    def missing(self) -> list[str]:
-        """Names (see FIELD_LABELS) of required settings that are still empty."""
+    def missing_email(self) -> list[str]:
+        """Required mailbox fields (this account only) that are still empty."""
         out = []
         if not self.email_address:
             out.append("email.address")
@@ -394,16 +450,25 @@ class Settings:
             out.append("email.password")
         if self.email_provider == "custom" and not self.imap_host:
             out.append("email.imap_host")
+        return out
+
+    def missing_global(self) -> list[str]:
+        """Required settings shared by all mailboxes (AI, push target)."""
+        out = []
         if self.ai_enabled:
             out.extend(self._missing_ai())
         if not self.target_umos:
             out.append("notify.target_umos")
         return out
 
+    def missing(self) -> list[str]:
+        """Names (see FIELD_LABELS) of required settings that are still empty."""
+        return self.missing_email() + self.missing_global()
+
     @property
     def ai_enabled(self) -> bool:
-        """AI judging is only used when the user picked scenarios / wrote a note."""
-        return bool(self.topic_description)
+        """AI judging runs only if the switch is on and there is something to judge by."""
+        return self.ai_switch and bool(self.topic_description)
 
     def _missing_ai(self) -> list[str]:
         out = []
@@ -430,7 +495,9 @@ class Settings:
         if not self.smtp_host:
             out.append("email.smtp_host")
         if self.selftest_use_ai:
-            if not self.ai_enabled:
+            if not self.ai_switch:
+                out.append("ai.enabled")
+            elif not self.topic_description:
                 out.append("rules.scenarios")
             out.extend(self._missing_ai())
         if not self.target_umos:
@@ -588,6 +655,7 @@ class Mail:
     subject: str
     date: str = ""
     preview: str = ""
+    account: str = ""  # which mailbox it came from; only set when several are configured
 
     @property
     def address(self) -> str:
@@ -723,6 +791,11 @@ def _open_readonly(imap: imaplib.IMAP4, folder: str) -> int:
     return _response_int(imap, "UIDVALIDITY") or 0
 
 
+def folder_key(st: Settings, folder: str) -> str:
+    """Key of one folder of one mailbox in the state file and in mail keys."""
+    return f"{st.account_id}|{folder}"
+
+
 def fetch_new(
     st: Settings, folder_state: dict[str, dict], limit: int, backfill: int
 ) -> dict[str, FolderResult]:
@@ -731,11 +804,12 @@ def fetch_new(
     results: dict[str, FolderResult] = {}
     try:
         for folder in st.imap_folders:
-            res = FolderResult(folder=folder)
-            results[folder] = res
+            fkey = folder_key(st, folder)  # state key: mailbox + folder
+            res = FolderResult(folder=fkey)
+            results[fkey] = res
             try:
                 res.uidvalidity = _open_readonly(imap, folder)
-                saved = folder_state.get(folder)
+                saved = folder_state.get(fkey)
                 res.baseline = not saved or saved.get("uidvalidity") != res.uidvalidity
                 if res.baseline:
                     uidnext = _response_int(imap, "UIDNEXT")
@@ -756,9 +830,10 @@ def fetch_new(
                     raw = _fetch_one(imap, uid, st.content_scope)
                     if raw is None:
                         continue  # vanished meanwhile; nothing to notify about
-                    res.mails.append(
-                        _build_mail(folder, uid, raw, st.content_scope, st.preview_length)
-                    )
+                    mail = _build_mail(fkey, uid, raw, st.content_scope, st.preview_length)
+                    if st.multi_account:
+                        mail.account = st.email_address
+                    res.mails.append(mail)
             except ImapError as e:
                 res.error = str(e)
             except (imaplib.IMAP4.error, OSError) as e:
@@ -1300,6 +1375,8 @@ def format_mail(mail: Mail, d: Decision, st: Settings, tz: str = "Asia/Shanghai"
         f"发件人：{sanitize(mail.sender, 120)}",
         f"标题：{sanitize(mail.subject, 200) or '（无标题）'}",
     ]
+    if mail.account:
+        lines.append(f"收件邮箱：{sanitize(mail.account, 80)}")
     when = format_mail_time(mail.date, tz)
     if when:
         lines.append(f"时间：{when}")
@@ -1320,6 +1397,7 @@ def format_digest(
         lines.append(
             f"{i}. {when + ' ' if when else ''}[{d.category}] "
             f"{sanitize(mail.sender, 40)} — {sanitize(mail.subject, 80)}"
+            + (f"（{sanitize(mail.account, 40)}）" if mail.account else "")
         )
     if len(entries) > 20:
         lines.append(f"……另有 {len(entries) - 20} 封")
@@ -1333,13 +1411,12 @@ def format_digest(
 
 def _default_state() -> dict:
     return {
-        "folders": {},  # folder -> {"uidvalidity": int, "last_uid": int}
-        "retries": {},  # "folder:uid" -> int
-        "queue": [],  # quiet-hours queue: [{"category","sender","subject","text"}]
+        "folders": {},  # "mailbox|folder" -> {"uidvalidity": int, "last_uid": int}
+        "retries": {},  # "mailbox|folder:uid" -> int
+        "queue": [],  # quiet-hours queue: [{"category","sender","subject","time","account"}]
         "failures": 0,
-        "auth_failures": 0,
+        "acct_failures": {},  # mailbox id -> consecutive login failures
         "alerted": False,
-        "auth_paused": False,
         "paused": False,
         "last_check": "",
         "last_result": "",
