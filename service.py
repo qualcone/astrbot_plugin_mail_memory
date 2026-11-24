@@ -244,6 +244,12 @@ class MailService:
         s["last_result"] = f"失败：{reason}"
         self.state.save()
 
+    def _log_other_problems(self, problems: list[str], sts: list[Settings]) -> None:
+        """The failure book keeps the first problem of a round; the rest still go to the log."""
+        secrets = [x for a in sts for x in a.secrets()]
+        for p in problems[1:]:
+            self.log.warning(f"邮件检查还有一个问题：{sanitize(redact(p, secrets), 200)}")
+
     async def _note_success(self, st: Settings, fetched: list[Settings]) -> None:
         s = self.state.data
         was_alerted = s["alerted"]
@@ -326,6 +332,7 @@ class MailService:
         if not fetched:
             if failed:
                 await self._note_failure(st, failed[0][0])
+                self._log_other_problems([t for _, t in failed], sts)
                 return RoundReport(False, failed[0][1])
             return RoundReport(
                 False, "所有邮箱都因登录失败暂停了检查，修改配置后发送 /mail resume 恢复。"
@@ -451,6 +458,7 @@ class MailService:
 
         if problems:
             await self._note_failure(st, problems[0])
+            self._log_other_problems(problems, sts)
         else:
             await self._note_success(st, fetched)
             self.state.save()

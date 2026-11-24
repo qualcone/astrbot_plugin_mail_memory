@@ -2,7 +2,7 @@ name: astrbot_plugin_mail_memory
 display_name: 邮件提醒
 short_desc: 只读邮箱标题，AI 按场景筛选重要邮件并推送给你，还能写入对话历史让机器人接着聊。
 desc: AI 筛选重要邮件并推送给你，只读发件人和标题，可写入对话历史，让机器人用人设语气和你聊这封邮件。支持 Gmail、QQ、163、Yahoo 等任意 IMAP 邮箱，可同时配置多个，带免打扰和自测。
-version: 0.5.0
+version: 0.5.1
 author: qualcone
 repo: https://github.com/qualcone/astrbot_plugin_mail_memory
 astrbot_version: ">=4.16,<5"

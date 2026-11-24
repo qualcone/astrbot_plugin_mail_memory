@@ -1748,6 +1748,22 @@ class MultiAccountTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue((await self.round()).ok)
         self.assertEqual(self.h.svc.state.data["acct_failures"], {})
 
+    async def test_every_problem_of_a_round_reaches_the_log_not_just_the_first(self):
+        self.h.cfg["accounts"][0]["password"] = "wrong-password-aaaa"
+        self.h.cfg["accounts"][1]["password"] = "wrong-password-bbbb"
+        r = await self.round()
+        self.assertFalse(r.ok)
+        logged = "\n".join(self.h.log.lines)
+        self.assertIn("邮件检查失败（第 1 次）", logged)  # the first one, via the failure book
+        self.assertIn("还有一个问题：b@b.test", logged)  # the second one is not swallowed, and named
+        self.assertNotIn("wrong-password", self.h.everything_logged())
+
+        self.h.cfg["accounts"][0]["password"] = PASSWORD  # A works again, B still broken, plus a bad folder
+        self.h.log.lines.clear()
+        r = await self.round()
+        self.assertFalse(r.ok)
+        self.assertIn("b@b.test", "\n".join(self.h.log.lines))
+
     async def test_selftest_folders_and_test_pick_a_mailbox(self):
         with mock.patch.object(imaplib, "IMAP4_SSL", TwoIMAP):
             out = await self.h.svc.folders(2)
