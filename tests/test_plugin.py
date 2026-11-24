@@ -21,7 +21,7 @@ from unittest import mock
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
-from astrbot_plugin_mail_notify import core, service  # noqa: E402
+from astrbot_plugin_mail_memory import core, service  # noqa: E402
 
 PASSWORD = "abcdefghijklmnop"
 API_KEY = "sk-test-secret-key-123"

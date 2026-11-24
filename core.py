@@ -1,4 +1,4 @@
-"""Core logic of astrbot_plugin_mail_notify.
+"""Core logic of astrbot_plugin_mail_memory.
 
 This module deliberately has no AstrBot imports, so it can be unit-tested with
 a plain Python interpreter. It only uses the standard library (``aiohttp`` is
@@ -685,7 +685,7 @@ def _send_imap_id(imap: imaplib.IMAP4) -> None:
     """RFC 2971 ID. NetEase (163/126) rejects SELECT with "Unsafe Login" without it."""
     try:
         imaplib.Commands.setdefault("ID", ("NONAUTH", "AUTH", "SELECTED"))
-        imap._simple_command("ID", '("name" "astrbot-mail-notify" "version" "1.0")')
+        imap._simple_command("ID", '("name" "astrbot-mail-memory" "version" "1.0")')
     except Exception:
         pass  # best effort; servers that do not need it may not support it
 
@@ -867,7 +867,7 @@ def send_selftest_mail(st: Settings, subject: str, token: str) -> None:
         msg["Date"] = formatdate(localtime=True)
         msg["Message-ID"] = make_msgid()
         msg.set_content(
-            "这是“邮件提醒”插件发出的自测邮件，用来检查 邮箱 → 机器人 → QQ 这条链路是否通畅。\n"
+            "这是“邮件提醒”插件发出的自测邮件，用来检查 邮箱 → 机器人 → 聊天 这条链路是否通畅。\n"
             "可以直接删除。\n"
         )
         if st.smtp_port == 465:

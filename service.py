@@ -164,7 +164,7 @@ class MailService:
                     ""
                     if ok
                     else f"{umo}: AstrBot 没有找到这个会话对应的平台（send_message 返回 False），"
-                    "请检查会话 ID 是否正确、对应的平台（NapCat/QQ）是否在线"
+                    "请检查会话 ID 是否正确、对应的平台适配器是否在线"
                 )
             if err:
                 self.log.error(f"邮件提醒推送失败：{err}")
@@ -560,7 +560,7 @@ class MailService:
             d = await self._voiced(st, d)
             lines.append(f"✅ AI 判断完成：会通知（类别“{d.category}”）")
         else:
-            d = Decision("notify", "自测", "这是一条自测通知，说明 邮箱 → 机器人 → QQ 这条链路是通的", "selftest")
+            d = Decision("notify", "自测", "这是一条自测通知，说明 邮箱 → 机器人 → 聊天 这条链路是通的", "selftest")
 
         # 4. push
         ok_count, errors = await self._deliver_detail(
@@ -568,7 +568,7 @@ class MailService:
         )
         total = len(st.target_umos)
         if ok_count == total:
-            lines.append(f"✅ 已推送到 QQ（{ok_count}/{total} 个会话）")
+            lines.append(f"✅ 已推送（{ok_count}/{total} 个会话）")
         elif ok_count:
             lines.append(f"⚠️ 只推送成功 {ok_count}/{total} 个会话")
         else:

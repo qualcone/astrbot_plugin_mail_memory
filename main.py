@@ -1,7 +1,7 @@
-"""astrbot_plugin_mail_notify
+"""astrbot_plugin_mail_memory
 
 Poll a mailbox (IMAP) read-only (headers only by default), let an LLM decide whether
-each new mail matters to you, and push the relevant ones to your QQ private chat.
+each new mail matters to you, and push the relevant ones to your chat.
 """
 
 from __future__ import annotations
@@ -16,7 +16,7 @@ from astrbot.api.star import Context, Star, StarTools
 from .core import LLMError, redact
 from .service import MailService
 
-PLUGIN_NAME = "astrbot_plugin_mail_notify"
+PLUGIN_NAME = "astrbot_plugin_mail_memory"
 FIRST_DELAY_SECONDS = 5
 
 
@@ -165,7 +165,7 @@ class MailNotifyPlugin(Star):
     @filter.permission_type(filter.PermissionType.ADMIN)
     @mail.command("selftest")
     async def mail_selftest(self, event: AstrMessageEvent):
-        """给自己发一封测试邮件，检查 邮箱 → 机器人 → QQ 是否通畅"""
+        """给自己发一封测试邮件，检查 邮箱 → 机器人 → 聊天 是否通畅"""
         if not event.is_admin():
             yield event.plain_result("需要管理员权限。")
             return
